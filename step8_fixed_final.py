@@ -1542,7 +1542,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             spreads_before = processor.calculate_spreads()
             print(f"\n📊 ΠΡΙΝ:")
-            print(f"  EP3 spread: {spreads_before['ep3']}")
+            print(f"  EP5 spread: {spreads_before['ep5']}")
+            print(f"  EP1 spread: {spreads_before['ep1']}")
+            print(f"  EP4 spread: {spreads_before['ep4']}")
+            print(f"  EP2 spread: {spreads_before['ep2']}")
             print(f"  Boys spread: {spreads_before['boys']}")
             print(f"  Girls spread: {spreads_before['girls']}")
             print(f"  Greek spread: {spreads_before['greek_yes']}")
@@ -1550,7 +1553,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             swaps, spreads_after = processor.optimize(max_iterations=args.max_iter)
 
             print(f"\n📊 ΜΕΤΑ:")
-            print(f"  EP3 spread: {spreads_after['ep3']} {'✅' if spreads_after['ep3'] <= 2 else '❌'}")
+            print(f"  EP5 spread: {spreads_after['ep5']} {'✅' if spreads_after['ep5'] <= 2 else '❌'}")
+            print(f"  EP1 spread: {spreads_after['ep1']} {'✅' if spreads_after['ep1'] <= 2 else '❌'}")
+            print(f"  EP4 spread: {spreads_after['ep4']} {'✅' if spreads_after['ep4'] <= 2 else '❌'}")
+            print(f"  EP2 spread: {spreads_after['ep2']} {'✅' if spreads_after['ep2'] <= 2 else '❌'}")
             print(f"  Boys spread: {spreads_after['boys']} {'✅' if spreads_after['boys'] <= 2 else '❌'}")
             print(f"  Girls spread: {spreads_after['girls']} {'✅' if spreads_after['girls'] <= 2 else '❌'}")
             print(f"  Greek spread: {spreads_after['greek_yes']} {'✅' if spreads_after['greek_yes'] <= 2 else '❌'}")
@@ -1580,7 +1586,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             
             spreads_before = processor.calculate_spreads()
             print(f"\n📊 ΠΡΙΝ:")
-            print(f"  EP3 spread: {spreads_before['ep3']}")
+            print(f"  EP5 spread: {spreads_before['ep5']}")
+            print(f"  EP1 spread: {spreads_before['ep1']}")
+            print(f"  EP4 spread: {spreads_before['ep4']}")
+            print(f"  EP2 spread: {spreads_before['ep2']}")
             print(f"  Boys spread: {spreads_before['boys']}")
             print(f"  Girls spread: {spreads_before['girls']}")
             print(f"  Greek spread: {spreads_before['greek_yes']}")
@@ -1588,7 +1597,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             swaps, spreads_after = processor.optimize(max_iterations=args.max_iter)
             
             print(f"\n📊 ΜΕΤΑ:")
-            print(f"  EP3 spread: {spreads_after['ep3']} {'✅' if spreads_after['ep3'] <= 2 else '❌'}")
+            print(f"  EP5 spread: {spreads_after['ep5']} {'✅' if spreads_after['ep5'] <= 2 else '❌'}")
+            print(f"  EP1 spread: {spreads_after['ep1']} {'✅' if spreads_after['ep1'] <= 2 else '❌'}")
+            print(f"  EP4 spread: {spreads_after['ep4']} {'✅' if spreads_after['ep4'] <= 2 else '❌'}")
+            print(f"  EP2 spread: {spreads_after['ep2']} {'✅' if spreads_after['ep2'] <= 2 else '❌'}")
             print(f"  Boys spread: {spreads_after['boys']} {'✅' if spreads_after['boys'] <= 2 else '❌'}")
             print(f"  Girls spread: {spreads_after['girls']} {'✅' if spreads_after['girls'] <= 2 else '❌'}")
             print(f"  Greek spread: {spreads_after['greek_yes']} {'✅' if spreads_after['greek_yes'] <= 2 else '❌'}")
@@ -1616,3 +1628,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as e:
         print(f"❌ Απρόσμενο σφάλμα: {e}", file=sys.stderr)
         return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

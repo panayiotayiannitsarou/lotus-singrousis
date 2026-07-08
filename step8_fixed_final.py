@@ -734,6 +734,18 @@ class UnifiedProcessor:
     def calculate_spreads(self) -> Dict[str, int]:
         """Υπολογισμός spreads για επίδοση 5→1→4→2, ελληνικά και φύλο."""
         stats = self._get_team_stats()
+        return self._spreads_from_stats(stats)
+
+    @staticmethod
+    def _spreads_from_stats(stats: Dict) -> Dict[str, int]:
+        """PERF FIX: εξάγει τα spreads από ΗΔΗ υπολογισμένο stats dict, χωρίς
+        να ξαναδιαβάζει όλους τους μαθητές. Πριν, calculate_spreads() και
+        _calc_spreads_after() καλούσαν _get_team_stats() (πλήρες πέρασμα O(N)
+        σε όλους τους μαθητές) ξεχωριστά για ΚΑΘΕ υποψήφιο swap σε κάθε
+        iteration — πρακτικά O(iterations × candidates × N). Τώρα το πέρασμα
+        αυτό γίνεται μία φορά ανά iteration και εδώ απλώς συγκρίνουμε ήδη
+        υπολογισμένα νούμερα ανά τμήμα (O(teams)).
+        """
         if not stats:
             return {
                 'ep5': 0, 'ep1': 0, 'ep4': 0, 'ep2': 0, 'ep3': 0,
@@ -833,7 +845,17 @@ class UnifiedProcessor:
         print(f"   Ιεραρχία επίδοσης: 5 → 1 → 4 → 2 | Όρια: επίδοση≤{MAX_EP}, γλώσσα≤{MAX_GR}, φύλο≤{MAX_GEN}")
 
         for iteration in range(max_iterations):
-            all_candidate_swaps = self._generate_all_valid_swaps(MAX_EP, MAX_GR, MAX_GEN)
+            # PERF FIX: υπολογίζουμε τα team stats ΜΙΑ φορά ανά iteration
+            # (όχι μία φορά ανά υποψήφιο swap) και τα περνάμε παρακάτω.
+            stats_before_iter = self._get_team_stats()
+            # PERF FIX: τα movable solos/pairs ενός τμήματος υπολογίζονταν
+            # ξανά για κάθε ζεύγος τμημάτων στο οποίο συμμετείχε (T-1 φορές).
+            # Τώρα υπολογίζονται μία φορά ανά τμήμα, ανά iteration.
+            solos_map = {t: self._get_movable_solos(t) for t in self.teams}
+            pairs_map = {t: self._get_movable_pairs(t) for t in self.teams}
+            all_candidate_swaps = self._generate_all_valid_swaps(
+                stats_before_iter, solos_map, pairs_map, MAX_EP, MAX_GR, MAX_GEN
+            )
 
             if not all_candidate_swaps:
                 print(f"✅ Δεν υπάρχουν άλλες νόμιμες βελτιωτικές ανταλλαγές στο iteration {iteration}. Βελτιστοποίηση ολοκληρώθηκε.")
@@ -865,21 +887,33 @@ class UnifiedProcessor:
 
         return applied_swaps, final_spreads
 
-    def _generate_all_valid_swaps(self, max_ep: int, max_gr: int, max_gen: int) -> List[Dict]:
+    def _generate_all_valid_swaps(self, stats_before: Dict, solos_map: Dict, pairs_map: Dict,
+                                   max_ep: int, max_gr: int, max_gen: int) -> List[Dict]:
         """
         Εξαντλητική αναζήτηση σε ΟΛΑ τα ζεύγη τμημάτων.
         Επιστρέφει μόνο swaps που περνούν τα hard rules και βελτιώνουν την ιεραρχία.
+
+        PERF FIX: το stats_before, καθώς και τα movable solos/pairs ανά τμήμα,
+        υπολογίζονται μία φορά ανά iteration από τον caller (optimize) και
+        περνιούνται εδώ, αντί να ξαναϋπολογίζονται μέσα σε κάθε _try_swap ή
+        για κάθε ζεύγος τμημάτων ξεχωριστά.
         """
         team_names = list(self.teams.keys())
         all_swaps = []
 
         for i, team_a in enumerate(team_names):
             for team_b in team_names[i+1:]:
-                all_swaps.extend(self._generate_swaps_for_pair(team_a, team_b, max_ep, max_gr, max_gen))
+                all_swaps.extend(
+                    self._generate_swaps_for_pair(
+                        team_a, team_b, stats_before, solos_map, pairs_map,
+                        max_ep, max_gr, max_gen
+                    )
+                )
 
         return all_swaps
 
-    def _generate_swaps_for_pair(self, team_a: str, team_b: str,
+    def _generate_swaps_for_pair(self, team_a: str, team_b: str, stats_before: Dict,
+                                  solos_map: Dict, pairs_map: Dict,
                                   max_ep: int, max_gr: int, max_gen: int) -> List[Dict]:
         """
         Δημιουργεί νόμιμες ανταλλαγές μεταξύ δύο τμημάτων.
@@ -890,15 +924,15 @@ class UnifiedProcessor:
         """
         swaps = []
 
-        solos_a = self._get_movable_solos(team_a)
-        solos_b = self._get_movable_solos(team_b)
-        pairs_a = self._get_movable_pairs(team_a)
-        pairs_b = self._get_movable_pairs(team_b)
+        solos_a = solos_map[team_a]
+        solos_b = solos_map[team_b]
+        pairs_a = pairs_map[team_a]
+        pairs_b = pairs_map[team_b]
 
         for s_a in solos_a:
             for s_b in solos_b:
                 swap = self._try_swap(team_a, [s_a['name']], team_b, [s_b['name']],
-                                      'Solo↔Solo', 1, max_ep, max_gr, max_gen)
+                                      'Solo↔Solo', 1, stats_before, max_ep, max_gr, max_gen)
                 if swap:
                     swaps.append(swap)
 
@@ -906,7 +940,7 @@ class UnifiedProcessor:
             for p_b in pairs_b:
                 swap = self._try_swap(team_a, [p_a['name_a'], p_a['name_b']],
                                       team_b, [p_b['name_a'], p_b['name_b']],
-                                      'Pair↔Pair', 2, max_ep, max_gr, max_gen)
+                                      'Pair↔Pair', 2, stats_before, max_ep, max_gr, max_gen)
                 if swap:
                     swaps.append(swap)
 
@@ -949,7 +983,7 @@ class UnifiedProcessor:
 
     def _try_swap(self, from_team: str, names_out: List[str],
                   to_team: str, names_in: List[str],
-                  swap_type: str, priority: int,
+                  swap_type: str, priority: int, stats_before: Dict,
                   max_ep: int, max_gr: int, max_gen: int) -> Optional[Dict]:
         """
         Smart-spread validation με ιεραρχία 5 → 1 → 4 → 2 → Ελληνικά → Φύλο.
@@ -959,9 +993,13 @@ class UnifiedProcessor:
         - Κρατά όλα τα βασικά spreads μέσα στα όρια ή τα μειώνει όταν είναι ήδη πάνω από όριο.
         - Δεν χειροτερεύει κανένα από τα κύρια κριτήρια.
         - Βελτιώνει τουλάχιστον ένα κριτήριο της ιεραρχίας.
+
+        PERF FIX: το stats_before περνιέται έτοιμο (υπολογισμένο μία φορά ανά
+        iteration) αντί να καλείται self.calculate_spreads() (πλήρες πέρασμα
+        O(N) σε όλους τους μαθητές) ξεχωριστά για κάθε υποψήφιο swap.
         """
-        spreads_before = self.calculate_spreads()
-        spreads_after  = self._calc_spreads_after(from_team, names_out, to_team, names_in)
+        spreads_before = self._spreads_from_stats(stats_before)
+        spreads_after  = self._calc_spreads_after(stats_before, from_team, names_out, to_team, names_in)
 
         # Hard constraint: δηλωμένη ΣΥΓΚΡΟΥΣΗ.
         if self._swap_creates_conflict(from_team, names_out, to_team, names_in):
@@ -1023,10 +1061,14 @@ class UnifiedProcessor:
             'priority': priority,
         }
 
-    def _calc_spreads_after(self, from_team: str, names_out: List[str],
+    def _calc_spreads_after(self, stats_before: Dict, from_team: str, names_out: List[str],
                              to_team: str, names_in: List[str]) -> Dict[str, int]:
-        """Υπολογισμός spreads μετά από υποθετική ανταλλαγή."""
-        stats_before = self._get_team_stats()
+        """Υπολογισμός spreads μετά από υποθετική ανταλλαγή.
+
+        PERF FIX: παίρνει το stats_before έτοιμο (υπολογισμένο μία φορά ανά
+        iteration) αντί να καλεί self._get_team_stats() -- πλήρες πέρασμα O(N)
+        σε όλους τους μαθητές -- για κάθε υποψήφιο swap.
+        """
         stats_after = {k: v.copy() for k, v in stats_before.items()}
 
         def _remove(team: str, name: str) -> None:
@@ -1176,8 +1218,9 @@ class UnifiedProcessor:
     def _calc_asymmetric_improvement(self, team_high: str, names_out: List[str],
                                       team_low: str, names_in: List[str]) -> Dict:
         """Backward-compatible improvement calculation με τη νέα ιεραρχία."""
-        before = self.calculate_spreads()
-        after = self._calc_spreads_after(team_high, names_out, team_low, names_in)
+        stats_before = self._get_team_stats()
+        before = self._spreads_from_stats(stats_before)
+        after = self._calc_spreads_after(stats_before, team_high, names_out, team_low, names_in)
         gender_before = max(before['boys'], before['girls'])
         gender_after = max(after['boys'], after['girls'])
         return {

@@ -149,8 +149,14 @@ def _parse_friends_cell(x) -> List[str]:
     if not s or s.upper() == "NAN":
         return []
     # Προσπάθησε python-literal list
+    # SECURITY FIX: eval() εκτελεί ΟΠΟΙΟΔΗΠΟΤΕ Python expression. Επειδή αυτή η
+    # τιμή προέρχεται από κελί Excel που ο χρήστης ανεβάζει (π.χ. σε Streamlit
+    # app), ένα κακόβουλο κελί (π.χ. "__import__('os').system(...)") θα
+    # εκτελούνταν στον server. Το ast.literal_eval() δέχεται ΜΟΝΟ literals
+    # (λίστες, strings, νούμερα κ.λπ.), ποτέ κλήσεις συναρτήσεων/εντολές.
     try:
-        val = eval(s, {}, {})
+        import ast
+        val = ast.literal_eval(s)
         if isinstance(val, list):
             return [str(t).strip() for t in val if str(t).strip()]
     except Exception:

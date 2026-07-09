@@ -1010,7 +1010,7 @@ class UnifiedProcessor:
 
         def _smart_ok(before: int, after: int, limit: int) -> bool:
             if before > limit:
-                return after < before
+                return after <= before  # FIX: επιτρέπει "να μη χειροτερεύει" (όχι μόνο αυστηρή βελτίωση)
             return after <= limit
 
         for key in self.PERFORMANCE_PRIORITY:

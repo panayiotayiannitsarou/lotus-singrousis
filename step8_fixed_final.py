@@ -820,12 +820,26 @@ class UnifiedProcessor:
 
     def optimize(self, max_iterations: int = 200) -> Tuple[List[Dict], Dict]:
         """
-        Ιεραρχημένη πολυκριτηριακή βελτιστοποίηση με swaps.
+        Ιεραρχημένη πολυκριτηριακή βελτιστοποίηση με swaps, σε ΔΥΟ διαδοχικούς
+        κύκλους (όπως περιγράφεται στην §4.2 του άρθρου):
 
-        Hard rules:
+        - Κύκλος 1 (αυστηρός): επιδιώκει βελτίωση της κατανομής επίδοσης
+          (5→1→4→2) ΧΩΡΙΣ καμία απολύτως επιδείνωση στην ισορροπία φύλου ή
+          γλωσσικής επάρκειας. Τρέχει μέχρι να μην υπάρχουν άλλα νόμιμα
+          βελτιωτικά swaps υπό αυτόν τον αυστηρό περιορισμό.
+        - Κύκλος 2 (ελεγχόμενης υποβάθμισης): ενεργοποιείται ΜΟΝΟ αν, μετά
+          τον Κύκλο 1, κάποιο κριτήριο επίδοσης παραμένει εκτός ορίου
+          (spread > MAX_SPREAD_EPIDOSIS). Επιτρέπει περιορισμένη υποβάθμιση
+          γλώσσας/φύλου, πάντα εντός του ήδη καθορισμένου αποδεκτού ορίου
+          (≤2), το οποίο δεν ξεπερνιέται ποτέ, και μόνο εφόσον βελτιώνει
+          τουλάχιστον ένα κριτήριο επίδοσης.
+
+        Hard rules (ισχύουν και στους δύο κύκλους):
         - Δεν δημιουργεί δηλωμένη ΣΥΓΚΡΟΥΣΗ.
         - Δεν μετακινεί locked μαθητές.
         - Δεν σπάει πλήρως αμοιβαίες δυάδες.
+        - Ποτέ δεν επιτρέπεται spread > MAX_SPREAD (επίδοση/γλώσσα/φύλο) πέρα
+          από ό,τι ίσχυε ήδη πριν το swap (βλ. _smart_ok).
 
         Ιεραρχία βελτίωσης:
         1. Επίδοση 5
@@ -839,12 +853,68 @@ class UnifiedProcessor:
         MAX_GR  = self.MAX_SPREAD_GREEK
         MAX_GEN = self.MAX_SPREAD_GENDER
 
-        applied_swaps = []
+        applied_swaps: List[Dict] = []
 
-        print(f"🔄 Ξεκινά ιεραρχημένη βελτιστοποίηση (max {max_iterations} iterations)...")
+        print(f"🔄 Ξεκινά ιεραρχημένη βελτιστοποίηση σε 2 κύκλους (max {max_iterations} iterations)...")
         print(f"   Ιεραρχία επίδοσης: 5 → 1 → 4 → 2 | Όρια: επίδοση≤{MAX_EP}, γλώσσα≤{MAX_GR}, φύλο≤{MAX_GEN}")
 
-        for iteration in range(max_iterations):
+        # ---- ΚΥΚΛΟΣ 1: αυστηρός — καμία επιδείνωση γλώσσας/φύλου ----
+        print(f"\n➡️  Κύκλος 1/2 (χωρίς καμία επιδείνωση γλώσσας/φύλου)...")
+        cycle1_swaps, iterations_used = self._run_swap_cycle(
+            cycle=1, strict_greek_gender=True,
+            max_iterations=max_iterations, iterations_used=0,
+            max_ep=MAX_EP, max_gr=MAX_GR, max_gen=MAX_GEN,
+        )
+        applied_swaps.extend(cycle1_swaps)
+
+        # ---- ΚΥΚΛΟΣ 2: ελεγχόμενη υποβάθμιση εντός ορίου (≤2) ----
+        spreads_after_cycle1 = self.calculate_spreads()
+        performance_still_over_limit = any(
+            spreads_after_cycle1[k] > MAX_EP for k in self.PERFORMANCE_PRIORITY
+        )
+        remaining_iterations = max_iterations - iterations_used
+
+        if performance_still_over_limit and remaining_iterations > 0:
+            print(f"\n➡️  Κύκλος 2/2 (επιτρέπεται περιορισμένη υποβάθμιση "
+                  f"γλώσσας/φύλου, πάντα εντός ορίου ≤{MAX_GR}/{MAX_GEN})...")
+            cycle2_swaps, iterations_used = self._run_swap_cycle(
+                cycle=2, strict_greek_gender=False,
+                max_iterations=max_iterations, iterations_used=iterations_used,
+                max_ep=MAX_EP, max_gr=MAX_GR, max_gen=MAX_GEN,
+            )
+            applied_swaps.extend(cycle2_swaps)
+        else:
+            reason = "όρια εντός στόχου" if not performance_still_over_limit else "εξαντλήθηκαν τα iterations"
+            print(f"\n✅ Κύκλος 2 δεν χρειάστηκε ({reason}).")
+
+        if iterations_used >= max_iterations:
+            print(f"⚠️ Έφτασε το συνολικό όριο των {max_iterations} iterations.")
+
+        final_spreads = self.calculate_spreads()
+        n_cycle1 = sum(1 for s in applied_swaps if s.get('cycle') == 1)
+        n_cycle2 = sum(1 for s in applied_swaps if s.get('cycle') == 2)
+        print(f"✅ Optimization ολοκληρώθηκε: {len(applied_swaps)} swaps "
+              f"(Κύκλος 1: {n_cycle1}, Κύκλος 2: {n_cycle2})")
+        print(f"   Final spreads: EP5={final_spreads['ep5']}, EP1={final_spreads['ep1']}, "
+              f"EP4={final_spreads['ep4']}, EP2={final_spreads['ep2']}, "
+              f"Greek={final_spreads['greek_yes']}, Boys={final_spreads['boys']}, Girls={final_spreads['girls']}")
+
+        return applied_swaps, final_spreads
+
+    def _run_swap_cycle(self, cycle: int, strict_greek_gender: bool,
+                         max_iterations: int, iterations_used: int,
+                         max_ep: int, max_gr: int, max_gen: int) -> Tuple[List[Dict], int]:
+        """
+        Τρέχει επαναληπτικά swaps για έναν κύκλο (1 ή 2) μέχρι να μην
+        υπάρχουν άλλα νόμιμα βελτιωτικά swaps ή να εξαντληθεί το κοινό
+        (και για τους δύο κύκλους) budget iterations.
+
+        Επιστρέφει τα swaps που εφαρμόστηκαν σε αυτόν τον κύκλο και το
+        ενημερωμένο πλήθος iterations που έχουν χρησιμοποιηθεί συνολικά.
+        """
+        cycle_swaps: List[Dict] = []
+
+        while iterations_used < max_iterations:
             # PERF FIX: υπολογίζουμε τα team stats ΜΙΑ φορά ανά iteration
             # (όχι μία φορά ανά υποψήφιο swap) και τα περνάμε παρακάτω.
             stats_before_iter = self._get_team_stats()
@@ -854,44 +924,43 @@ class UnifiedProcessor:
             solos_map = {t: self._get_movable_solos(t) for t in self.teams}
             pairs_map = {t: self._get_movable_pairs(t) for t in self.teams}
             all_candidate_swaps = self._generate_all_valid_swaps(
-                stats_before_iter, solos_map, pairs_map, MAX_EP, MAX_GR, MAX_GEN
+                stats_before_iter, solos_map, pairs_map, max_ep, max_gr, max_gen,
+                strict_greek_gender=strict_greek_gender, cycle=cycle,
             )
 
             if not all_candidate_swaps:
-                print(f"✅ Δεν υπάρχουν άλλες νόμιμες βελτιωτικές ανταλλαγές στο iteration {iteration}. Βελτιστοποίηση ολοκληρώθηκε.")
+                print(f"   ✅ Δεν υπάρχουν άλλες νόμιμες βελτιωτικές ανταλλαγές "
+                      f"(Κύκλος {cycle}, iteration {iterations_used}). Ο κύκλος ολοκληρώθηκε.")
                 break
 
             best_swap = self._select_best_swap_hierarchical(all_candidate_swaps)
-
             if not best_swap:
-                print(f"✅ Δεν βρέθηκε καλύτερη ανταλλαγή στο iteration {iteration}.")
+                print(f"   ✅ Δεν βρέθηκε καλύτερη ανταλλαγή (Κύκλος {cycle}, iteration {iterations_used}).")
                 break
 
             self._apply_swap(best_swap)
-            applied_swaps.append(best_swap)
+            cycle_swaps.append(best_swap)
+            iterations_used += 1
 
-            spreads = self.calculate_spreads()
-            if (iteration + 1) % 10 == 0:
-                print(f"  Iteration {iteration + 1}: {len(applied_swaps)} swaps | "
+            if iterations_used % 10 == 0:
+                spreads = self.calculate_spreads()
+                print(f"   Κύκλος {cycle} — iteration {iterations_used}: {len(cycle_swaps)} swaps | "
                       f"EP5={spreads['ep5']} EP1={spreads['ep1']} "
                       f"EP4={spreads['ep4']} EP2={spreads['ep2']} "
                       f"GR={spreads['greek_yes']} B={spreads['boys']} G={spreads['girls']}")
-        else:
-            print(f"⚠️ Έφτασε το όριο των {max_iterations} iterations.")
 
-        final_spreads = self.calculate_spreads()
-        print(f"✅ Optimization ολοκληρώθηκε: {len(applied_swaps)} swaps")
-        print(f"   Final spreads: EP5={final_spreads['ep5']}, EP1={final_spreads['ep1']}, "
-              f"EP4={final_spreads['ep4']}, EP2={final_spreads['ep2']}, "
-              f"Greek={final_spreads['greek_yes']}, Boys={final_spreads['boys']}, Girls={final_spreads['girls']}")
-
-        return applied_swaps, final_spreads
+        return cycle_swaps, iterations_used
 
     def _generate_all_valid_swaps(self, stats_before: Dict, solos_map: Dict, pairs_map: Dict,
-                                   max_ep: int, max_gr: int, max_gen: int) -> List[Dict]:
+                                   max_ep: int, max_gr: int, max_gen: int,
+                                   strict_greek_gender: bool = True, cycle: int = 1) -> List[Dict]:
         """
         Εξαντλητική αναζήτηση σε ΟΛΑ τα ζεύγη τμημάτων.
         Επιστρέφει μόνο swaps που περνούν τα hard rules και βελτιώνουν την ιεραρχία.
+
+        strict_greek_gender: True για τον Κύκλο 1 (καμία επιδείνωση γλώσσας/
+        φύλου επιτρεπτή)· False για τον Κύκλο 2 (επιτρέπεται περιορισμένη
+        υποβάθμιση, πάντα εντός των ορίων max_gr/max_gen). Βλ. _try_swap.
 
         PERF FIX: το stats_before, καθώς και τα movable solos/pairs ανά τμήμα,
         υπολογίζονται μία φορά ανά iteration από τον caller (optimize) και
@@ -906,7 +975,8 @@ class UnifiedProcessor:
                 all_swaps.extend(
                     self._generate_swaps_for_pair(
                         team_a, team_b, stats_before, solos_map, pairs_map,
-                        max_ep, max_gr, max_gen
+                        max_ep, max_gr, max_gen,
+                        strict_greek_gender=strict_greek_gender, cycle=cycle,
                     )
                 )
 
@@ -914,7 +984,8 @@ class UnifiedProcessor:
 
     def _generate_swaps_for_pair(self, team_a: str, team_b: str, stats_before: Dict,
                                   solos_map: Dict, pairs_map: Dict,
-                                  max_ep: int, max_gr: int, max_gen: int) -> List[Dict]:
+                                  max_ep: int, max_gr: int, max_gen: int,
+                                  strict_greek_gender: bool = True, cycle: int = 1) -> List[Dict]:
         """
         Δημιουργεί νόμιμες ανταλλαγές μεταξύ δύο τμημάτων.
         Εξετάζει:
@@ -932,7 +1003,8 @@ class UnifiedProcessor:
         for s_a in solos_a:
             for s_b in solos_b:
                 swap = self._try_swap(team_a, [s_a['name']], team_b, [s_b['name']],
-                                      'Solo↔Solo', 1, stats_before, max_ep, max_gr, max_gen)
+                                      'Solo↔Solo', 1, stats_before, max_ep, max_gr, max_gen,
+                                      strict_greek_gender=strict_greek_gender, cycle=cycle)
                 if swap:
                     swaps.append(swap)
 
@@ -940,7 +1012,8 @@ class UnifiedProcessor:
             for p_b in pairs_b:
                 swap = self._try_swap(team_a, [p_a['name_a'], p_a['name_b']],
                                       team_b, [p_b['name_a'], p_b['name_b']],
-                                      'Pair↔Pair', 2, stats_before, max_ep, max_gr, max_gen)
+                                      'Pair↔Pair', 2, stats_before, max_ep, max_gr, max_gen,
+                                      strict_greek_gender=strict_greek_gender, cycle=cycle)
                 if swap:
                     swaps.append(swap)
 
@@ -984,15 +1057,27 @@ class UnifiedProcessor:
     def _try_swap(self, from_team: str, names_out: List[str],
                   to_team: str, names_in: List[str],
                   swap_type: str, priority: int, stats_before: Dict,
-                  max_ep: int, max_gr: int, max_gen: int) -> Optional[Dict]:
+                  max_ep: int, max_gr: int, max_gen: int,
+                  strict_greek_gender: bool = True, cycle: int = 1) -> Optional[Dict]:
         """
         Smart-spread validation με ιεραρχία 5 → 1 → 4 → 2 → Ελληνικά → Φύλο.
 
         Δέχεται swap μόνο αν:
         - Δεν δημιουργεί ΣΥΓΚΡΟΥΣΗ.
-        - Κρατά όλα τα βασικά spreads μέσα στα όρια ή τα μειώνει όταν είναι ήδη πάνω από όριο.
-        - Δεν χειροτερεύει κανένα από τα κύρια κριτήρια.
+        - Κρατά όλα τα βασικά spreads μέσα στα όρια ή τα μειώνει όταν είναι ήδη πάνω από όριο
+          (βλ. _smart_ok) — αυτό το hard bound (≤ max_gr/max_gen) ΠΟΤΕ δεν παραβιάζεται,
+          ανεξάρτητα από κύκλο.
+        - Δεν χειροτερεύει κανένα από τα κριτήρια επίδοσης (5→1→4→2) σε ΚΑΝΕΝΑΝ κύκλο.
         - Βελτιώνει τουλάχιστον ένα κριτήριο της ιεραρχίας.
+
+        strict_greek_gender (δύο κύκλοι σύμφωνα με §4.2 του άρθρου):
+        - True  (Κύκλος 1): επιπλέον απαιτείται να ΜΗΝ χειροτερεύουν καθόλου
+          η γλωσσική επάρκεια ή το φύλο (delta_greek/delta_gender ≥ 0).
+        - False (Κύκλος 2): επιτρέπεται περιορισμένη υποβάθμιση γλώσσας/
+          φύλου (delta < 0), αρκεί να παραμένουν εντός του ήδη
+          καθορισμένου αποδεκτού ορίου (≤ max_gr/max_gen μέσω _smart_ok) και
+          το swap να βελτιώνει τουλάχιστον ένα κριτήριο επίδοσης — αλλιώς η
+          «θυσία» γλώσσας/φύλου δεν έχει νόημα.
 
         PERF FIX: το stats_before περνιέται έτοιμο (υπολογισμένο μία φορά ανά
         iteration) αντί να καλείται self.calculate_spreads() (πλήρες πέρασμα
@@ -1013,6 +1098,7 @@ class UnifiedProcessor:
                 return after <= before  # FIX: επιτρέπει "να μη χειροτερεύει" (όχι μόνο αυστηρή βελτίωση)
             return after <= limit
 
+        # Hard bound (≤ max_ep/max_gr/max_gen): ισχύει ΠΑΝΤΑ, και στους δύο κύκλους.
         for key in self.PERFORMANCE_PRIORITY:
             if not _smart_ok(spreads_before[key], spreads_after[key], max_ep):
                 return None
@@ -1034,13 +1120,26 @@ class UnifiedProcessor:
             'delta_ep3': spreads_before.get('ep3', 0) - spreads_after.get('ep3', 0),
         }
 
-        # No harm στα κύρια κριτήρια.
-        if any(deltas[k] < 0 for k in ['delta_ep5', 'delta_ep1', 'delta_ep4', 'delta_ep2', 'delta_greek', 'delta_gender']):
+        performance_keys = ['delta_ep5', 'delta_ep1', 'delta_ep4', 'delta_ep2']
+
+        # No harm στα κριτήρια επίδοσης — ισχύει ΠΑΝΤΑ, ανεξαρτήτως κύκλου.
+        if any(deltas[k] < 0 for k in performance_keys):
             return None
 
-        # Τουλάχιστον ένα κριτήριο βελτιώνεται.
-        if all(deltas[k] == 0 for k in ['delta_ep5', 'delta_ep1', 'delta_ep4', 'delta_ep2', 'delta_greek', 'delta_gender']):
-            return None
+        if strict_greek_gender:
+            # Κύκλος 1: καμία απολύτως επιδείνωση γλώσσας/φύλου.
+            if deltas['delta_greek'] < 0 or deltas['delta_gender'] < 0:
+                return None
+            no_harm_keys = performance_keys + ['delta_greek', 'delta_gender']
+            if all(deltas[k] == 0 for k in no_harm_keys):
+                return None
+        else:
+            # Κύκλος 2: επιτρέπεται delta_greek/delta_gender < 0, αλλά ήδη
+            # εγγυημένο ότι δεν ξεπερνά το όριο (_smart_ok παραπάνω). Το
+            # swap πρέπει να βελτιώνει όντως κάποιο κριτήριο επίδοσης —
+            # αλλιώς δεν αξίζει να «θυσιαστεί» γλώσσα/φύλο.
+            if all(deltas[k] == 0 for k in performance_keys):
+                return None
 
         imp = {
             'improves': True,
@@ -1059,6 +1158,7 @@ class UnifiedProcessor:
             'students_in': names_in,
             'improvement': imp,
             'priority': priority,
+            'cycle': cycle,
         }
 
     def _calc_spreads_after(self, stats_before: Dict, from_team: str, names_out: List[str],
@@ -1393,7 +1493,7 @@ class UnifiedProcessor:
     def _create_swaps_log_sheet(self, wb: Workbook, swaps: List[Dict]) -> None:
         sheet = wb.create_sheet('ΕΦΑΡΜΟΣΜΕΝΑ_SWAPS')
 
-        headers = ['#', 'Τύπος', 'Από Τμήμα', 'Μαθητές OUT',
+        headers = ['#', 'Κύκλος', 'Τύπος', 'Από Τμήμα', 'Μαθητές OUT',
                    'Προς Τμήμα', 'Μαθητές IN', 'Δ_ep5', 'Δ_ep1', 'Δ_ep4', 'Δ_ep2',
                    'Δ_γνώσης', 'Δ_φύλου', 'Priority']
 
@@ -1413,6 +1513,7 @@ class UnifiedProcessor:
 
             values = [
                 idx,
+                swap.get('cycle', 1),
                 swap['type'],
                 swap['from_team'],
                 ', '.join(swap['students_out']),

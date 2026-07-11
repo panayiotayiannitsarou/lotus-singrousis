@@ -113,17 +113,75 @@ def build_step1_6_per_scenario(input_excel: str, output_excel: str, pick_step4: 
             sid = _sid(s1col)
 
             # STEP 2
-            options2 = m_step2.step2_apply_FIXED_v3(df1.copy(), step1_col_name=s1col, seed=42, max_results=5)
-            if options2:
-                df2 = options2[0][1]
-                s2col = f"ΒΗΜΑ2_ΣΕΝΑΡΙΟ_{sid}"
+            options2_raw = m_step2.step2_apply_FIXED_v3(
+                df1.copy(),
+                step1_col_name=s1col,
+                seed=42,
+                max_results=5,
+            )
+
+            # Κρατάμε μόνο πραγματικά έγκυρες λύσεις.
+            # Η νέα έκδοση του Step 2 μπορεί να επιστρέψει diagnostic option
+            # με πεδίο metrics["infeasible_reason"], ώστε να εξηγεί γιατί δεν
+            # βρέθηκε λύση. Αυτό ΔΕΝ πρέπει να αντιμετωπίζεται ως κανονική λύση.
+            options2 = []
+            step2_failures = []
+
+            for opt in (options2_raw or []):
+                try:
+                    label, opt_df, metrics = opt
+                except Exception:
+                    step2_failures.append({
+                        "label": "UNKNOWN",
+                        "reason": "INVALID_STEP2_OPTION_FORMAT",
+                        "metrics": {},
+                    })
+                    continue
+
+                metrics = metrics if isinstance(metrics, dict) else {}
+                reason = metrics.get("infeasible_reason")
+
+                if reason:
+                    step2_failures.append({
+                        "label": label,
+                        "reason": str(reason),
+                        "metrics": metrics,
+                    })
+                    continue
+
+                options2.append((label, opt_df, metrics))
+
+            if not options2:
+                # Δεν συνεχίζουμε με κενή ΒΗΜΑ2, γιατί αυτό θα έδινε ψευδή
+                # εικόνα ότι η κατανομή προχώρησε στα επόμενα βήματα.
+                if step2_failures:
+                    details = "; ".join(
+                        f"{x['label']}: {x['reason']}"
+                        for x in step2_failures
+                    )
+                else:
+                    details = "Το Step 2 δεν επέστρεψε καμία έγκυρη επιλογή."
+
+                raise RuntimeError(
+                    f"Αποτυχία Step 2 για το σενάριο {sid} "
+                    f"({s1col}). {details}"
+                )
+
+            # Επιλογή της καλύτερης έγκυρης λύσης.
+            # Το Step 2 επιστρέφει ήδη τις λύσεις ταξινομημένες από καλύτερη
+            # προς χειρότερη με βάση τα παιδαγωγικά κριτήρια.
+            df2 = options2[0][1]
+            s2col = f"ΒΗΜΑ2_ΣΕΝΑΡΙΟ_{sid}"
+
+            if s2col not in df2.columns:
+                cands = [c for c in df2.columns if str(c).startswith("ΒΗΜΑ2_")]
+                s2col = cands[0] if cands else s2col
+
                 if s2col not in df2.columns:
-                    cands = [c for c in df2.columns if str(c).startswith("ΒΗΜΑ2_")]
-                    s2col = cands[0] if cands else s2col
-                    if s2col not in df2.columns:
-                        df2[s2col] = ""
-            else:
-                df2 = df1.copy(); s2col = f"ΒΗΜΑ2_ΣΕΝΑΡΙΟ_{sid}"; df2[s2col] = ""
+                    raise RuntimeError(
+                        f"Το Step 2 επέστρεψε έγκυρη επιλογή για το σενάριο {sid}, "
+                        "αλλά δεν βρέθηκε στήλη ΒΗΜΑ2_*."
+                    )
 
             base = df1.copy()
             base = base.merge(df2[["ΟΝΟΜΑ", s2col]], on="ΟΝΟΜΑ", how="left")

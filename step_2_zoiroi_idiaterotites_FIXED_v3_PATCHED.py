@@ -220,10 +220,22 @@ def step2_apply_FIXED_v3(
     *,
     seed: int = 42,
     max_results: int = 5,
+    candidate_pool_size: int = 100,
+    max_search_nodes: Optional[int] = None,
 ) -> List[Tuple[str, pd.DataFrame, Dict[str, Any]]]:
     """
-    Επιστρέφει έως max_results σενάρια ως (label, DataFrame, metrics).
-    Το DataFrame περιέχει στήλες εισόδου + «ΒΗΜΑ2_ΣΕΝΑΡΙΟ_{k}» όπου k = id του ΒΗΜΑ1_ΣΕΝΑΡΙΟ_k.
+    Βελτιστοποιημένο ακριβές Branch-and-Bound για το Βήμα 2.
+
+    Η παιδαγωγική σειρά παραμένει ίδια:
+    1. καμία δηλωμένη σύγκρουση (hard constraint),
+    2. τήρηση των στόχων ΖΩΗΡΩΝ/ΙΔΙΑΙΤΕΡΟΤΗΤΩΝ,
+    3. αν υπάρχει λύση με 0 παιδαγωγικά δύσκολες συνυπάρξεις, προτιμάται,
+    4. λιγότερες σπασμένες αμοιβαίες φιλίες,
+    5. μικρότερο συνολικό penalty.
+
+    Η διαφορά από την παλιά έκδοση είναι τεχνική: δεν αντιγράφει DataFrame σε
+    κάθε κόμβο, χρησιμοποιεί incremental counters και κόβει νωρίς κλαδιά που
+    δεν μπορούν πλέον να φτάσουν τους ελάχιστους/μέγιστους στόχους.
     """
     random.seed(seed)
     df = normalize_columns(df_in).copy()
@@ -231,116 +243,366 @@ def step2_apply_FIXED_v3(
     class_labels = [f"Α{i+1}" for i in range(num_classes)]
     scope = scope_step2(df, step1_col=step1_col_name)
 
-    # Πλήρες σύνολο δηλωμένων συγκρούσεων για ΟΛΟ τον πληθυσμό του τρέχοντος σεναρίου.
-    # Δεν γίνεται teacher filtering εδώ. Το Step 2 ελέγχει κάθε νέο μαθητή απέναντι
-    # σε όλους τους ήδη τοποθετημένους μαθητές.
+    # Ανθεκτική αντιμετώπιση κενών: NaN, "" και strings με spaces.
+    step1_clean = df[step1_col_name].apply(
+        lambda x: "" if pd.isna(x) else str(x).strip()
+    )
+    df[step1_col_name] = step1_clean.replace("", pd.NA)
+
     conflict_pairs, unresolved_conflicts = _extract_declared_conflict_pairs(df)
 
-    to_place = df[(pd.isna(df[step1_col_name])) & ((df["ΖΩΗΡΟΣ"] == "Ν") | (df["ΙΔΙΑΙΤΕΡΟΤΗΤΑ"] == "Ν"))]["ΟΝΟΜΑ"].astype(str).tolist()
+    rows_by_name = {
+        str(r["ΟΝΟΜΑ"]).strip(): r
+        for _, r in df.iterrows()
+    }
+    names = list(rows_by_name)
+    z_flag = {
+        n: str(rows_by_name[n].get("ΖΩΗΡΟΣ", "")).strip() == "Ν"
+        for n in names
+    }
+    i_flag = {
+        n: str(rows_by_name[n].get("ΙΔΙΑΙΤΕΡΟΤΗΤΑ", "")).strip() == "Ν"
+        for n in names
+    }
+
+    fixed_class = {}
+    for _, r in df.iterrows():
+        n = str(r["ΟΝΟΜΑ"]).strip()
+        cl = r.get(step1_col_name)
+        if pd.notna(cl) and str(cl).strip() in class_labels:
+            fixed_class[n] = str(cl).strip()
+
+    to_place = [
+        n for n in names
+        if n not in fixed_class and (z_flag[n] or i_flag[n])
+    ]
     targets = _compute_targets_global(df, step1_col=step1_col_name, class_labels=class_labels)
 
-    best: List[Tuple[pd.DataFrame, int, int, int, int]] = []
-    assign: Dict[str, str] = {}
+    # Canonical conflict adjacency για O(1) έλεγχο χωρίς προσωρινά DataFrames.
+    def _canon(x):
+        if _conflict_guard is not None and hasattr(_conflict_guard, "canon_name"):
+            return _conflict_guard.canon_name(x)
+        return str(x).strip().upper()
+
+    canon_to_name = {_canon(n): n for n in names}
+    conflict_adj = {n: set() for n in names}
+    for a, b in conflict_pairs or []:
+        na = canon_to_name.get(_canon(a))
+        nb = canon_to_name.get(_canon(b))
+        if na and nb and na != nb:
+            conflict_adj[na].add(nb)
+            conflict_adj[nb].add(na)
+
+    # Ασφαλές fallback όταν το conflict_guard δεν είναι διαθέσιμο ή δεν επέστρεψε
+    # ζεύγη. Διαβάζει και τις μονόπλευρες δηλώσεις της στήλης ΣΥΓΚΡΟΥΣΗ και
+    # τις μετατρέπει σε συμμετρική adjacency, ώστε η σύγκρουση να παραμένει hard constraint.
+    if "ΣΥΓΚΡΟΥΣΗ" in df.columns:
+        for _, r in df.iterrows():
+            src_name = str(r.get("ΟΝΟΜΑ", "")).strip()
+            if src_name not in conflict_adj:
+                continue
+            for token in parse_friends_cell(r.get("ΣΥΓΚΡΟΥΣΗ", "")):
+                dst_name = canon_to_name.get(_canon(token))
+                if dst_name and dst_name != src_name:
+                    conflict_adj[src_name].add(dst_name)
+                    conflict_adj[dst_name].add(src_name)
+
+    def _scenario_has_conflict(scenario_df: pd.DataFrame, scenario_col: str) -> bool:
+        """Τελικός καθολικός έλεγχος δηλωμένων συγκρούσεων για ολόκληρο το σενάριο."""
+        if scenario_col not in scenario_df.columns:
+            return True
+
+        # Πρώτα χρησιμοποιείται ο κοινός guard, όταν είναι διαθέσιμος.
+        if _conflict_guard is not None and conflict_pairs:
+            try:
+                if _conflict_guard.has_conflict_violation(
+                    scenario_df, scenario_col, conflict_pairs
+                ):
+                    return True
+            except Exception as e:
+                print(f"⚠️ Αποτυχία τελικού conflict_guard ελέγχου στο Step 2: {e}")
+
+        # Ανεξάρτητη δεύτερη δικλείδα με την adjacency (λειτουργεί και ως fallback).
+        class_of = {}
+        for _, rr in scenario_df.iterrows():
+            name = str(rr.get("ΟΝΟΜΑ", "")).strip()
+            cl = rr.get(scenario_col)
+            if name and pd.notna(cl) and str(cl).strip():
+                class_of[name] = str(cl).strip()
+        for a, neighbours in conflict_adj.items():
+            cl_a = class_of.get(a)
+            if cl_a is None:
+                continue
+            for b in neighbours:
+                if a < b and class_of.get(b) == cl_a:
+                    return True
+        return False
+
+    # Έλεγχος πριν από την αναζήτηση: αν δύο ήδη κλειδωμένοι μαθητές του Step 1
+    # συγκρούονται στο ίδιο τμήμα, το Step 2 δεν μπορεί να διορθώσει το πρόβλημα.
+    fixed_conflict_pairs = []
+    for a, neighbours in conflict_adj.items():
+        cl_a = fixed_class.get(a)
+        if cl_a is None:
+            continue
+        for b in neighbours:
+            if a < b and fixed_class.get(b) == cl_a:
+                fixed_conflict_pairs.append((a, b, cl_a))
 
     def deg(name: str) -> int:
-        row = df[df["ΟΝΟΜΑ"] == name].iloc[0]
-        return len(parse_friends_cell(row.get("ΣΥΓΚΡΟΥΣΗ", ""))) + len(parse_friends_cell(row.get("ΦΙΛΟΙ", "")))
+        row = rows_by_name[name]
+        return len(conflict_adj.get(name, ())) + len(parse_friends_cell(row.get("ΦΙΛΟΙ", "")))
 
+    # Δυσκολότεροι/περισσότερο περιορισμένοι μαθητές πρώτα.
     to_place_sorted = sorted(
         to_place,
         key=lambda n: (
-            -(
-                str(df.loc[df["ΟΝΟΜΑ"] == n, "ΖΩΗΡΟΣ"].values[0]).strip() == "Ν"
-                and str(df.loc[df["ΟΝΟΜΑ"] == n, "ΙΔΙΑΙΤΕΡΟΤΗΤΑ"].values[0]).strip() == "Ν"
-            ),
-            -(str(df.loc[df["ΟΝΟΜΑ"] == n, "ΙΔΙΑΙΤΕΡΟΤΗΤΑ"].values[0]).strip() == "Ν"),
-            -(str(df.loc[df["ΟΝΟΜΑ"] == n, "ΖΩΗΡΟΣ"].values[0]).strip() == "Ν"),
+            -(z_flag[n] and i_flag[n]),
+            -i_flag[n],
+            -z_flag[n],
             -deg(n),
+            n,
         ),
     )
 
-    def backtrack(i: int) -> None:
-        if i == len(to_place_sorted):
-            cand = df.copy()
-            cand_col = "ΒΗΜΑ2_TMP"
-            cand[cand_col] = cand[step1_col_name]
-            for n, cl in assign.items():
-                cand.loc[cand["ΟΝΟΜΑ"] == n, cand_col] = cl
+    # Suffix counts για exact feasibility pruning.
+    m = len(to_place_sorted)
+    rem_z = [0] * (m + 1)
+    rem_i = [0] * (m + 1)
+    for idx in range(m - 1, -1, -1):
+        n = to_place_sorted[idx]
+        rem_z[idx] = rem_z[idx + 1] + int(z_flag[n])
+        rem_i[idx] = rem_i[idx + 1] + int(i_flag[n])
 
-            counts_new = {cl: 0 for cl in class_labels}
-            for cl in assign.values():
-                counts_new[cl] += 1
-            if sum(counts_new.values()) > 0 and max(counts_new.values()) == sum(counts_new.values()):
-                return
+    z_counts = targets["Z_step1"].copy()
+    i_counts = targets["I_step1"].copy()
+    assign: Dict[str, str] = {}
 
-            Zc = targets["Z_step1"].copy()
-            Ic = targets["I_step1"].copy()
-            for n, cl in assign.items():
-                row = df[df["ΟΝΟΜΑ"] == n].iloc[0]
-                if str(row.get("ΖΩΗΡΟΣ", "")).strip() == "Ν": Zc[cl] += 1
-                if str(row.get("ΙΔΙΑΙΤΕΡΟΤΗΤΑ", "")).strip() == "Ν": Ic[cl] += 1
+    members_by_class = {cl: [] for cl in class_labels}
+    for n, cl in fixed_class.items():
+        members_by_class[cl].append(n)
+
+    # Οι αμοιβαίες φιλίες που επηρεάζονται από το Step 2.
+    mutual_pairs = list(mutual_pairs_in_scope(df, scope))
+
+    # Κρατάμε μικρό pool από τις καλύτερες πλήρεις λύσεις, όχι εκατομμύρια DataFrames.
+    pool_limit = max(int(candidate_pool_size), int(max_results), 10)
+    pool: List[Tuple[Tuple[int, int, int, int], Dict[str, str], int, int, int, int]] = []
+    nodes_visited = 0
+    complete_solutions = 0
+    search_stopped_early = False
+
+    def _pair_penalty(a: str, b: str) -> int:
+        return _pair_conflict_penalty(z_flag[a], i_flag[a], z_flag[b], i_flag[b])
+
+    def _broken_count_full() -> int:
+        class_of = dict(fixed_class)
+        class_of.update(assign)
+        return sum(1 for a, b in mutual_pairs if class_of.get(a) != class_of.get(b))
+
+    def _rank(ped_cnt: int, broken: int, total: int) -> Tuple[int, int, int, int]:
+        # Ακριβώς η τελική λογική της παλιάς έκδοσης.
+        if ped_cnt == 0:
+            return (0, broken, total, ped_cnt)
+        return (1, total, broken, ped_cnt)
+
+    def _store_solution(ped_cnt: int, conf_sum: int) -> None:
+        nonlocal complete_solutions
+        complete_solutions += 1
+        broken = _broken_count_full()
+        total = conf_sum + 5 * broken
+        rank = _rank(ped_cnt, broken, total)
+        pool.append((rank, dict(assign), ped_cnt, broken, total, conf_sum))
+        pool.sort(key=lambda x: x[0])
+        if len(pool) > pool_limit:
+            del pool[pool_limit:]
+
+    def _targets_still_reachable(next_i: int) -> bool:
+        """True αν οι υπόλοιποι μαθητές μπορούν ακόμη να καλύψουν όλα τα q/max."""
+        rz = rem_z[next_i]
+        ri = rem_i[next_i]
+        for cl in class_labels:
+            if z_counts[cl] > targets["Z"]["max"]:
+                return False
+            if i_counts[cl] > targets["I"]["max"]:
+                return False
+            # Ακόμη κι αν ΟΛΟΙ οι υπόλοιποι Ζ/I πάνε εδώ, φτάνουμε το ελάχιστο;
+            if z_counts[cl] + rz < targets["Z"]["q"]:
+                return False
+            if i_counts[cl] + ri < targets["I"]["q"]:
+                return False
+        return True
+
+    def _class_order(name: str) -> List[str]:
+        """Δοκιμάζει πρώτα τα τμήματα με μεγαλύτερη ανάγκη στις κατηγορίες του μαθητή."""
+        def key(cl: str):
+            z_need = targets["Z"]["q"] - z_counts[cl] if z_flag[name] else 0
+            i_need = targets["I"]["q"] - i_counts[cl] if i_flag[name] else 0
+            load = len(members_by_class[cl])
+            return (-(z_need + i_need), load, cl)
+        return sorted(class_labels, key=key)
+
+    def backtrack(i: int, ped_cnt: int, conf_sum: int) -> None:
+        nonlocal nodes_visited, search_stopped_early
+        nodes_visited += 1
+        if max_search_nodes is not None and nodes_visited > int(max_search_nodes):
+            search_stopped_early = True
+            return
+
+        if not _targets_still_reachable(i):
+            return
+
+        # Αν έχουμε ήδη λύση με 0 δύσκολες συνυπάρξεις, κλαδί με ped>0 δεν μπορεί να κερδίσει.
+        if pool and pool[0][0][0] == 0 and ped_cnt > 0:
+            return
+
+        if i == m:
             for cl in class_labels:
-                if not (targets["Z"]["q"] <= Zc[cl] <= targets["Z"]["max"]): return
-                if not (targets["I"]["q"] <= Ic[cl] <= targets["I"]["max"]): return
-
-            # Τελική ασφάλεια: δεν μπαίνει στη λίστα best σενάριο Step 2
-            # που περιέχει έστω μία δηλωμένη/εξωτερική σύγκρουση.
-            if _has_declared_conflict_violation(cand, cand_col, conflict_pairs):
+                if not (targets["Z"]["q"] <= z_counts[cl] <= targets["Z"]["max"]):
+                    return
+                if not (targets["I"]["q"] <= i_counts[cl] <= targets["I"]["max"]):
+                    return
+            # Αποφυγή εκφυλιστικής λύσης όπου όλοι οι νέοι μπαίνουν στο ίδιο τμήμα.
+            if m and len(set(assign.values())) == 1:
                 return
-
-            ped_cnt = _count_ped_conflicts(cand, cand_col)
-            conf_sum = _sum_conflicts(cand, cand_col)
-            broken = _broken_mutual_pairs(cand, cand_col, scope)
-            total = conf_sum + 5 * broken
-            best.append((cand, ped_cnt, broken, total, conf_sum))
+            _store_solution(ped_cnt, conf_sum)
             return
 
         name = to_place_sorted[i]
-        for cl in class_labels:
-            if not _prereject(assign, name, cl, df, step1_col_name, class_labels, targets, conflict_pairs=conflict_pairs):
+        for cl in _class_order(name):
+            # Hard conflict check με fixed + ήδη assigned μέλη του τμήματος.
+            if any(member in conflict_adj.get(name, ()) for member in members_by_class[cl]):
                 continue
+
+            new_z = z_counts[cl] + int(z_flag[name])
+            new_i = i_counts[cl] + int(i_flag[name])
+            if new_z > targets["Z"]["max"] or new_i > targets["I"]["max"]:
+                continue
+
+            add_conf = 0
+            add_ped = 0
+            for member in members_by_class[cl]:
+                p = _pair_penalty(name, member)
+                add_conf += p
+                if p > 0:
+                    add_ped += 1
+
             assign[name] = cl
-            backtrack(i + 1)
+            members_by_class[cl].append(name)
+            z_counts[cl] = new_z
+            i_counts[cl] = new_i
+
+            backtrack(i + 1, ped_cnt + add_ped, conf_sum + add_conf)
+
+            i_counts[cl] -= int(i_flag[name])
+            z_counts[cl] -= int(z_flag[name])
+            members_by_class[cl].pop()
             del assign[name]
 
-    backtrack(0)
+            if search_stopped_early and max_search_nodes is not None:
+                return
 
-    if not best:
+    # Baseline penalties μεταξύ ήδη fixed μαθητών του Step 1.
+    base_ped = 0
+    base_conf = 0
+    for cl in class_labels:
+        members = members_by_class[cl]
+        for a_i in range(len(members)):
+            for b_i in range(a_i + 1, len(members)):
+                p = _pair_penalty(members[a_i], members[b_i])
+                base_conf += p
+                if p > 0:
+                    base_ped += 1
+
+    # Δεν ξεκινά η δαπανηρή αναζήτηση όταν το εισερχόμενο Step 1 είναι ήδη
+    # ασύμβατο με hard constraint που το Step 2 δεν επιτρέπεται να αλλάξει.
+    if not fixed_conflict_pairs:
+        backtrack(0, base_ped, base_conf)
+
+    base_id = _extract_step1_id(step1_col_name)
+    final_col = f"ΒΗΜΑ2_ΣΕΝΑΡΙΟ_{base_id}"
+
+    if fixed_conflict_pairs:
         tmp = df.copy()
-        base_id = _extract_step1_id(step1_col_name)
-        tmp[f"ΒΗΜΑ2_ΣΕΝΑΡΙΟ_{base_id}"] = tmp[step1_col_name]
-        return [("option_1", tmp, {"ped_conflicts": None, "broken": None, "penalty": None, "declared_conflict_pairs": int(len(conflict_pairs)), "unresolved_conflicts": int(unresolved_conflicts)})]
+        tmp[final_col] = tmp[step1_col_name]
+        return [("option_1", tmp, {
+            "ped_conflicts": None,
+            "broken": None,
+            "penalty": None,
+            "declared_conflict_pairs": int(len(conflict_pairs)),
+            "unresolved_conflicts": int(unresolved_conflicts),
+            "fixed_conflict_violations": int(len(fixed_conflict_pairs)),
+            "infeasible_reason": "STEP1_FIXED_CONFLICT",
+            "search_nodes": 0,
+            "complete_solutions": 0,
+            "search_stopped_early": False,
+        })]
 
-    zero_ped = [x for x in best if x[1] == 0]
-    selected = []
+    if not pool:
+        tmp = df.copy()
+        tmp[final_col] = tmp[step1_col_name]
+        return [("option_1", tmp, {
+            "ped_conflicts": None,
+            "broken": None,
+            "penalty": None,
+            "declared_conflict_pairs": int(len(conflict_pairs)),
+            "unresolved_conflicts": int(unresolved_conflicts),
+            "search_nodes": int(nodes_visited),
+            "complete_solutions": int(complete_solutions),
+            "search_stopped_early": bool(search_stopped_early),
+            "fixed_conflict_violations": 0,
+            "infeasible_reason": (
+                "SEARCH_NODE_LIMIT" if search_stopped_early else "NO_FEASIBLE_STEP2_ASSIGNMENT"
+            ),
+        })]
 
-    total_pairs = len(mutual_pairs_in_scope(df, scope))
-
-    if zero_ped:
-        min_broken = min(x[2] for x in zero_ped)
-        tier1 = [x for x in zero_ped if x[2] == min_broken]
-        min_total = min(x[3] for x in tier1)
-        tier2 = [x for x in tier1 if x[3] == min_total]
-        selected = tier2
-    else:
-        min_total = min(x[3] for x in best)
-        tier1 = [x for x in best if x[3] == min_total]
-        max_preserved = max(total_pairs - x[2] for x in tier1)
-        tier2 = [x for x in tier1 if (total_pairs - x[2]) == max_preserved]
-        selected = tier2
+    # Μόνο οι ισόβαθμες καλύτερες λύσεις, έως max_results.
+    best_rank = pool[0][0]
+    selected = [x for x in pool if x[0] == best_rank][:max_results]
 
     results: List[Tuple[str, pd.DataFrame, Dict[str, Any]]] = []
-    base_id = _extract_step1_id(step1_col_name)
-    for k, (cand, ped_cnt, broken, total, conf_sum) in enumerate(selected, start=1):
-        out = cand.copy()
-        final_col = f"ΒΗΜΑ2_ΣΕΝΑΡΙΟ_{base_id}"
-        out[final_col] = out["ΒΗΜΑ2_TMP"]
-        out.drop(columns=["ΒΗΜΑ2_TMP"], inplace=True)
+    for k, (_rank_key, assignment, ped_cnt, broken, total, conf_sum) in enumerate(selected, start=1):
+        out = df.copy()
+        out[final_col] = out[step1_col_name]
+        for n, cl in assignment.items():
+            out.loc[out["ΟΝΟΜΑ"].astype(str).str.strip() == n, final_col] = cl
+        # Τελική καθολική επαλήθευση πριν επιστραφεί οποιοδήποτε αποτέλεσμα.
+        # Καλύπτει fixed-fixed, fixed-new και new-new συγκρούσεις.
+        if _scenario_has_conflict(out, final_col):
+            continue
+
         results.append((f"option_{k}", out, {
             "ped_conflicts": int(ped_cnt),
             "broken": int(broken),
             "penalty": int(total),
+            "conflict_sum": int(conf_sum),
             "declared_conflict_pairs": int(len(conflict_pairs)),
             "unresolved_conflicts": int(unresolved_conflicts),
+            "fixed_conflict_violations": 0,
+            "final_conflict_check_passed": True,
+            "search_nodes": int(nodes_visited),
+            "complete_solutions": int(complete_solutions),
+            "candidate_pool_size": int(len(pool)),
+            "search_stopped_early": bool(search_stopped_early),
         }))
+
+    # Θεωρητικά δεν πρέπει να συμβεί, αλλά δεν επιστρέφεται ποτέ υποψήφιο
+    # που απέτυχε στον τελικό hard-constraint έλεγχο.
+    if not results:
+        tmp = df.copy()
+        tmp[final_col] = tmp[step1_col_name]
+        return [("option_1", tmp, {
+            "ped_conflicts": None,
+            "broken": None,
+            "penalty": None,
+            "declared_conflict_pairs": int(len(conflict_pairs)),
+            "unresolved_conflicts": int(unresolved_conflicts),
+            "fixed_conflict_violations": 0,
+            "infeasible_reason": "FINAL_CONFLICT_CHECK_FAILED",
+            "search_nodes": int(nodes_visited),
+            "complete_solutions": int(complete_solutions),
+            "candidate_pool_size": int(len(pool)),
+            "search_stopped_early": bool(search_stopped_early),
+        })]
     return results
+

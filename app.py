@@ -786,7 +786,14 @@ if xl is not None:
         if missing_cols:
             st.info("Συμπλήρωσε/διόρθωσε τις στήλες που λείπουν στο Excel και ξαναφόρτωσέ το.")
         stats_df = generate_stats(used_df)
-        st.dataframe(stats_df, use_container_width=True)
+        stats_display = stats_df[[
+            "ΠΑΙΔΙ_ΕΚΠΑΙΔΕΥΤΙΚΟΥ",
+            "ΖΩΗΡΟΙ",
+            "ΙΔΙΑΙΤΕΡΟΤΗΤΑ",
+            "ΣΥΓΚΡΟΥΣΗ",
+            "ΣΠΑΣΜΕΝΗ ΦΙΛΙΑ",
+        ]]
+        st.dataframe(stats_display, use_container_width=True)
 
         if SHOW_STATS_EXPORT_BUTTON:
             st.download_button(

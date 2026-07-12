@@ -1376,48 +1376,72 @@ class UnifiedProcessor:
     
     def _create_team_sheet(self, wb: Workbook, team_name: str) -> None:
         sheet = wb.create_sheet(team_name)
-        
-        headers = ['ΟΝΟΜΑ', 'ΦΥΛΟ', 'ΚΑΛΗ_ΓΝΩΣΗ_ΕΛΛΗΝΙΚΩΝ', 'ΕΠΙΔΟΣΗ', 'ΦΙΛΟΙ']
+
+        headers = [
+            'ΟΝΟΜΑ',
+            'ΦΥΛΟ',
+            'ΚΑΛΗ_ΓΝΩΣΗ_ΕΛΛΗΝΙΚΩΝ',
+            'ΕΠΙΔΟΣΗ',
+            'ΦΙΛΟΙ',
+            'ΠΑΙΔΙ_ΕΚΠΑΙΔΕΥΤΙΚΟΥ',
+            'ΖΩΗΡΟΣ',
+            'ΙΔΙΑΙΤΕΡΟΤΗΤΑ',
+            'ΣΥΓΚΡΟΥΣΗ',
+        ]
         for col_idx, header in enumerate(headers, start=1):
             cell = sheet.cell(1, col_idx)
             cell.value = header
             cell.font = Font(bold=True)
             cell.fill = PatternFill(start_color='DDEBF7', fill_type='solid')
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-        
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
         row_idx = 2
         for name in sorted(self.teams[team_name]):
             if name not in self.students:
                 continue
-            
+
             student = self.students[name]
-            
+            source_student = self.students_data.get(name)
+
             # Normalize greek_knowledge
             greek_val = student.greek_knowledge
             if greek_val in ['N', 'n']:
                 greek_val = 'Ν'
             elif greek_val in ['O', 'o']:
                 greek_val = 'Ο'
-            
+
             sheet.cell(row_idx, 1).value = student.name
             sheet.cell(row_idx, 2).value = student.gender
             sheet.cell(row_idx, 3).value = greek_val
             sheet.cell(row_idx, 4).value = student.choice
             sheet.cell(row_idx, 5).value = ', '.join(student.friends)
-            
-            for col in range(1, 6):
+            sheet.cell(row_idx, 6).value = source_student.teacher_child if source_student else ''
+            sheet.cell(row_idx, 7).value = source_student.calm if source_student else ''
+            sheet.cell(row_idx, 8).value = source_student.special_needs if source_student else ''
+            sheet.cell(row_idx, 9).value = ', '.join(student.conflict_names)
+
+            for col in range(1, 10):
                 sheet.cell(row_idx, col).alignment = Alignment(
-                    horizontal='left' if col in [1,5] else 'center', 
-                    vertical='center'
+                    horizontal='left' if col in [1, 5, 9] else 'center',
+                    vertical='center',
+                    wrap_text=(col in [5, 9])
                 )
-            
+
             row_idx += 1
-        
-        sheet.column_dimensions['A'].width = 30
-        sheet.column_dimensions['B'].width = 12
-        sheet.column_dimensions['C'].width = 25
-        sheet.column_dimensions['D'].width = 12
-        sheet.column_dimensions['E'].width = 40
+
+        widths = {
+            'A': 30,
+            'B': 12,
+            'C': 25,
+            'D': 12,
+            'E': 40,
+            'F': 24,
+            'G': 14,
+            'H': 20,
+            'I': 40,
+        }
+        for col_letter, width in widths.items():
+            sheet.column_dimensions[col_letter].width = width
     
     def _create_statistics_sheet(self, wb: Workbook, spreads: Dict) -> None:
         sheet = wb.create_sheet('ΒΕΛΤΙΩΜΕΝΗ_ΣΤΑΤΙΣΤΙΚΗ')

@@ -110,7 +110,7 @@ def _conflict_in_class(
     if _cg_can_place_student is not None:
         try:
             tmp_df = df.copy()
-            tmp_df[tmp_col] = np.nan
+            tmp_df[tmp_col] = pd.Series([pd.NA] * len(tmp_df), index=tmp_df.index, dtype="object")
             if isinstance(assign, dict):
                 for idx, cl in assign.items():
                     if idx in tmp_df.index and pd.notna(cl) and str(cl).strip():

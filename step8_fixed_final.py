@@ -770,15 +770,66 @@ class UnifiedProcessor:
         }
 
     def _get_team_stats(self) -> Dict:
-        """Μέτρηση stats ανά τμήμα."""
+        """Μέτρηση στατιστικών ανά τμήμα με canonical έλεγχο ονομάτων."""
         stats = {}
+
+        team_by_canon = {}
+        original_by_canon = {}
+        for team_name, student_names in self.teams.items():
+            for name in student_names:
+                canon = _canon_name(name)
+                if canon:
+                    team_by_canon[canon] = team_name
+                    original_by_canon[canon] = name
+
+        conflict_pairs = set()
+        for name, student in self.students.items():
+            a = _canon_name(name)
+            if not a:
+                continue
+            for other in student.conflict_names:
+                b = _canon_name(other)
+                if a and b and a != b and b in team_by_canon:
+                    conflict_pairs.add(tuple(sorted((a, b))))
+
+        conflict_count_by_team = {team: 0 for team in self.teams}
+        for a, b in conflict_pairs:
+            ta = team_by_canon.get(a)
+            tb = team_by_canon.get(b)
+            if ta and ta == tb:
+                conflict_count_by_team[ta] += 1
+
+        mutual_pairs = set()
+        for name, student in self.students.items():
+            a = _canon_name(name)
+            if not a:
+                continue
+            for friend in student.friends:
+                b = _canon_name(friend)
+                if not b or a == b or b not in original_by_canon:
+                    continue
+                friend_name = original_by_canon[b]
+                friend_student = self.students.get(friend_name)
+                if friend_student and _name_in_list(name, friend_student.friends):
+                    mutual_pairs.add(tuple(sorted((a, b))))
+
+        broken_count_by_team = {team: 0 for team in self.teams}
+        for a, b in mutual_pairs:
+            ta = team_by_canon.get(a)
+            tb = team_by_canon.get(b)
+            if ta and tb and ta != tb:
+                broken_count_by_team[ta] += 1
+                broken_count_by_team[tb] += 1
+
         for team_name, student_names in self.teams.items():
             boys = girls = greek_yes = greek_no = 0
             ep1 = ep2 = ep3 = ep4 = ep5 = 0
+            teacher_count = calm_count = special_count = 0
 
             for name in student_names:
                 if name not in self.students:
                     continue
+
                 s = self.students[name]
 
                 if s.gender == 'Α':
@@ -802,10 +853,30 @@ class UnifiedProcessor:
                 elif s.choice == 5:
                     ep5 += 1
 
+                source_student = self.students_data.get(name)
+                if source_student:
+                    if str(source_student.teacher_child).strip().upper() in {'Ν', 'N'}:
+                        teacher_count += 1
+                    if str(source_student.calm).strip().upper() in {'Ν', 'N'}:
+                        calm_count += 1
+                    if str(source_student.special_needs).strip().upper() in {'Ν', 'N'}:
+                        special_count += 1
+
             stats[team_name] = {
-                'boys': boys, 'girls': girls,
-                'greek_yes': greek_yes, 'greek_no': greek_no,
-                'ep1': ep1, 'ep2': ep2, 'ep3': ep3, 'ep4': ep4, 'ep5': ep5
+                'boys': boys,
+                'girls': girls,
+                'greek_yes': greek_yes,
+                'greek_no': greek_no,
+                'ep1': ep1,
+                'ep2': ep2,
+                'ep3': ep3,
+                'ep4': ep4,
+                'ep5': ep5,
+                'teacher_count': teacher_count,
+                'calm_count': calm_count,
+                'special_count': special_count,
+                'conflict_violations': conflict_count_by_team.get(team_name, 0),
+                'broken_friendships': broken_count_by_team.get(team_name, 0),
             }
 
         return stats
@@ -1415,9 +1486,9 @@ class UnifiedProcessor:
             sheet.cell(row_idx, 3).value = greek_val
             sheet.cell(row_idx, 4).value = student.choice
             sheet.cell(row_idx, 5).value = ', '.join(student.friends)
-            sheet.cell(row_idx, 6).value = source_student.teacher_child if source_student else ''
-            sheet.cell(row_idx, 7).value = source_student.calm if source_student else ''
-            sheet.cell(row_idx, 8).value = source_student.special_needs if source_student else ''
+            sheet.cell(row_idx, 6).value = source_student.teacher_child if source_student else 'Ο'
+            sheet.cell(row_idx, 7).value = source_student.calm if source_student else 'Ο'
+            sheet.cell(row_idx, 8).value = source_student.special_needs if source_student else 'Ο'
             sheet.cell(row_idx, 9).value = ', '.join(student.conflict_names)
 
             for col in range(1, 10):
@@ -1444,33 +1515,57 @@ class UnifiedProcessor:
             sheet.column_dimensions[col_letter].width = width
     
     def _create_statistics_sheet(self, wb: Workbook, spreads: Dict) -> None:
+        """Δημιουργία πλήρους φύλλου ΒΕΛΤΙΩΜΕΝΗ_ΣΤΑΤΙΣΤΙΚΗ."""
         sheet = wb.create_sheet('ΒΕΛΤΙΩΜΕΝΗ_ΣΤΑΤΙΣΤΙΚΗ')
 
-        headers = ['Τμήμα', 'Σύνολο', 'Αγόρια', 'Κορίτσια',
-                   'Γνώση (ΝΑΙ)', 'Γνώση (ΟΧΙ)', 'Επ1', 'Επ2', 'Επ3', 'Επ4', 'Επ5']
+        headers = [
+            'Τμήμα', 'Σύνολο', 'Αγόρια', 'Κορίτσια',
+            'Γνώση (ΝΑΙ)', 'Γνώση (ΟΧΙ)',
+            'Παιδιά Εκπαιδευτικών', 'Ζωηροί', 'Ιδιαιτερότητα',
+            'Συγκρούσεις', 'Σπασμένες Φιλίες',
+            'Επ1', 'Επ2', 'Επ3', 'Επ4', 'Επ5'
+        ]
 
         for col_idx, header in enumerate(headers, start=1):
             cell = sheet.cell(1, col_idx)
             cell.value = header
             cell.font = Font(bold=True)
             cell.fill = PatternFill(start_color='C6E0B4', fill_type='solid')
-            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
         stats = self._get_team_stats()
         row_idx = 2
+
         for team_name in sorted(self.teams.keys()):
             if team_name not in stats:
                 continue
-            s = stats[team_name]
 
+            s = stats[team_name]
             values = [
-                team_name, len(self.teams[team_name]), s['boys'], s['girls'],
-                s['greek_yes'], s['greek_no'], s['ep1'], s['ep2'], s['ep3'], s['ep4'], s['ep5']
+                team_name,
+                len(self.teams[team_name]),
+                s['boys'],
+                s['girls'],
+                s['greek_yes'],
+                s['greek_no'],
+                s['teacher_count'],
+                s['calm_count'],
+                s['special_count'],
+                s['conflict_violations'],
+                s['broken_friendships'],
+                s['ep1'],
+                s['ep2'],
+                s['ep3'],
+                s['ep4'],
+                s['ep5']
             ]
+
             for col_idx, value in enumerate(values, start=1):
                 sheet.cell(row_idx, col_idx).value = value
-                sheet.cell(row_idx, col_idx).alignment = Alignment(horizontal='center', vertical='center')
-
+                sheet.cell(row_idx, col_idx).alignment = Alignment(
+                    horizontal='center',
+                    vertical='center'
+                )
             row_idx += 1
 
         row_idx += 2
@@ -1484,6 +1579,7 @@ class UnifiedProcessor:
             cell.value = header
             cell.font = Font(bold=True)
             cell.fill = PatternFill(start_color='FFF2CC', fill_type='solid')
+
         row_idx += 1
 
         summary_data = [
@@ -1510,9 +1606,14 @@ class UnifiedProcessor:
 
             row_idx += 1
 
-        for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']:
-            sheet.column_dimensions[col].width = 20
-        sheet.column_dimensions['A'].width = 38
+        widths = {
+            'A': 38, 'B': 12, 'C': 12, 'D': 12, 'E': 16, 'F': 16,
+            'G': 24, 'H': 14, 'I': 18, 'J': 16, 'K': 20,
+            'L': 10, 'M': 10, 'N': 10, 'O': 10, 'P': 10
+        }
+
+        for col_letter, width in widths.items():
+            sheet.column_dimensions[col_letter].width = width
 
     def _create_swaps_log_sheet(self, wb: Workbook, swaps: List[Dict]) -> None:
         sheet = wb.create_sheet('ΕΦΑΡΜΟΣΜΕΝΑ_SWAPS')

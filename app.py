@@ -5,7 +5,7 @@ SHOW_STATS_EXPORT_BUTTON = False  # κρύβει το κουμπί 'Εξαγωγ
 import importlib
 import importlib.util
 
-import re, os, json, importlib.util, datetime as dt, math, base64, unicodedata
+import re, os, json, importlib.util, datetime as dt, math, base64, unicodedata, traceback
 from pathlib import Path
 from io import BytesIO
 
@@ -379,6 +379,63 @@ with colC:
         except Exception:
             st.caption("Δεν ήταν δυνατή η ανάγνωση για προεπισκόπηση.")
 
+
+def _show_distribution_error(exc: Exception) -> None:
+    """Εμφανίζει κατανοητό μήνυμα αντί για σκέτο τεχνικό traceback."""
+    technical = traceback.format_exc()
+    message = str(exc)
+    technical_lower = technical.lower()
+
+    st.error("❌ Η κατανομή δεν ολοκληρώθηκε.")
+
+    if isinstance(exc, KeyError) and "step4_corrected.py" in technical_lower:
+        missing_key = message.strip("'\"")
+        st.warning(
+            "**Πρόβλημα στο Βήμα 4 — επικαλυπτόμενες αμοιβαίες φιλίες.**\n\n"
+            f"Ο μαθητής/η μαθήτρια με εσωτερικό δείκτη **{missing_key}** "
+            "φαίνεται να συμμετέχει σε περισσότερες από μία δυάδες. "
+            "Το πρόγραμμα προσπάθησε να επεξεργαστεί ή να αφαιρέσει την ίδια "
+            "τοποθέτηση δεύτερη φορά."
+        )
+        st.info(
+            "Έλεγξε στο αρχείο Excel τη στήλη **ΦΙΛΟΙ**. "
+            "Ένας μαθητής μπορεί να έχει πολλούς φίλους, αλλά το Βήμα 4 πρέπει "
+            "να επιλέξει μία μόνο πλήρως αμοιβαία δυάδα για κάθε μαθητή."
+        )
+
+    elif isinstance(exc, FileNotFoundError):
+        st.warning(
+            "**Λείπει απαραίτητο αρχείο του προγράμματος.**\n\n"
+            f"{message}"
+        )
+        st.info("Έλεγξε ότι τα αρχεία στο GitHub έχουν ακριβώς τα ονόματα που αναζητά το `app.py`.")
+
+    elif isinstance(exc, KeyError):
+        st.warning(
+            "**Λείπει αναμενόμενη στήλη ή εγγραφή.**\n\n"
+            f"Το πρόγραμμα δεν βρήκε το πεδίο: **{message}**."
+        )
+        st.info(
+            "Έλεγξε τις επικεφαλίδες του Excel και βεβαιώσου ότι δεν υπάρχουν "
+            "κενές, διπλές ή μετονομασμένες στήλες."
+        )
+
+    elif isinstance(exc, ValueError):
+        st.warning(f"**Μη έγκυρα ή ασύμβατα δεδομένα εισόδου.**\n\n{message}")
+        st.info(
+            "Έλεγξε τον αριθμό τμημάτων, τα κενά πεδία, τις φιλίες, τις συγκρούσεις "
+            "και τις τιμές Ν/Ο στο αρχείο Excel."
+        )
+
+    else:
+        st.warning(
+            "**Παρουσιάστηκε μη αναμενόμενο τεχνικό σφάλμα.**\n\n"
+            f"{type(exc).__name__}: {message}"
+        )
+
+    with st.expander("🔧 Τεχνικές λεπτομέρειες για έλεγχο", expanded=False):
+        st.code(technical, language="text")
+
 if st.button("🚀 ΕΚΤΕΛΕΣΗ ΚΑΤΑΝΟΜΗΣ", type="primary", use_container_width=True):
     if missing:
         st.error("Δεν είναι δυνατή η εκτέλεση: λείπουν modules.")
@@ -523,7 +580,7 @@ if st.button("🚀 ΕΚΤΕΛΕΣΗ ΚΑΤΑΝΟΜΗΣ", type="primary", use_con
                             )
                         st.caption("ℹ️ Το αρχείο αποθηκεύτηκε και θα χρησιμοποιηθεί **αυτόματα** από τα «📊 Στατιστικά».")
         except Exception as e:
-            st.exception(e)
+            _show_distribution_error(e)
 
 st.divider()
 

@@ -126,14 +126,28 @@ class Step1ImmutableProcessor:
         # Εντοπισμός παιδιών εκπαιδευτικών
         teacher_kids = self._get_teacher_kids(df_norm)
         if not teacher_kids:
-            print("Δεν υπάρχουν παιδιά εκπαιδευτικών - κενά αποτελέσματα")
-            return Step1Results(
-                scenarios=tuple(),
+            print("Δεν υπάρχουν παιδιά εκπαιδευτικών - δημιουργείται κενό βασικό σενάριο")
+
+            # Απαραίτητο fallback για ασφαλή συνέχεια της ροής προς το Βήμα 2.
+            # Παρότι δεν γίνεται καμία τοποθέτηση στο Βήμα 1, πρέπει να υπάρχει
+            # μία στήλη ΒΗΜΑ1_ΣΕΝΑΡΙΟ_1, κενή για όλους τους μαθητές.
+            empty_scenario = Step1Scenario(
+                id=1,
+                column_name="ΒΗΜΑ1_ΣΕΝΑΡΙΟ_1",
+                assignments={},
+                description="Κενό βασικό σενάριο — δεν υπάρχουν παιδιά εκπαιδευτικών",
+                broken_friendships=0,
+                metadata={"empty_base_scenario": True},
+            )
+
+            self._results = Step1Results(
+                scenarios=(empty_scenario,),
                 friendships=frozenset(),
                 teacher_kids=tuple(),
                 num_classes=num_classes,
                 creation_timestamp=pd.Timestamp.now().isoformat()
             )
+            return self._results
         
         print(f"Εντοπίστηκαν {len(teacher_kids)} παιδιά εκπαιδευτικών")
         

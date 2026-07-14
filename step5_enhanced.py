@@ -482,11 +482,22 @@ def export_step5_like_template(step34_xlsx_path: str, out_xlsx_path: str) -> str
             if col4 not in df.columns:
                 df.to_excel(writer, index=False, sheet_name=sh)
                 continue
-            updated_df, score = step5_place_remaining_students(df.copy(), scenario_col=col4, num_classes=None)
+            # Δημιουργούμε ξεχωριστή στήλη Βήματος 5 ως ακριβές αντίγραφο
+            # της ολοκληρωμένης στήλης του Βήματος 4. Οι νέες αναθέσεις του
+            # Βήματος 5 γράφονται πλέον απευθείας στη col5, ώστε η col4 να
+            # παραμένει αμετάβλητη και να διατηρείται καθαρή ιχνηλασιμότητα.
+            df_step5 = df.copy()
+            df_step5[col5] = df_step5[col4]
+
+            updated_df, score = step5_place_remaining_students(
+                df_step5,
+                scenario_col=col5,
+                num_classes=None,
+            )
             base = ['Α/Α','ΟΝΟΜΑ','ΦΥΛΟ','ΖΩΗΡΟΣ','ΙΔΙΑΙΤΕΡΟΤΗΤΑ','ΠΑΙΔΙ_ΕΚΠΑΙΔΕΥΤΙΚΟΥ','ΚΑΛΗ_ΓΝΩΣΗ_ΕΛΛΗΝΙΚΩΝ','ΦΙΛΟΙ']
             step_cols = [f'ΒΗΜΑ1_ΣΕΝΑΡΙΟ_{sid}', f'ΒΗΜΑ2_ΣΕΝΑΡΙΟ_{sid}', f'ΒΗΜΑ3_ΣΕΝΑΡΙΟ_{sid}', f'ΒΗΜΑ4_ΣΕΝΑΡΙΟ_{sid}']
             out_cols = [c for c in base + step_cols if c in updated_df.columns]
             out_df = updated_df[out_cols].copy()
-            out_df[col5] = updated_df[col4]
+            out_df[col5] = updated_df[col5]
             out_df.to_excel(writer, index=False, sheet_name=sh)
     return out_xlsx_path
